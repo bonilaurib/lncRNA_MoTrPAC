@@ -1,0 +1,173 @@
+# ===============================================================
+#  Project: The Long Non-coding RNA Landscape of Endurance Exercise Training
+#  Author: Bernardo Bonilauri
+#  Institution: Stanford University, Department of Medicine
+#  Script: 01_Figure1_Exercise_Tissue_Analysis.R
+# ===============================================================
+
+# ---------------------------------------------------------------
+# Load Required Libraries
+# ---------------------------------------------------------------
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(DESeq2)
+  library(clusterProfiler)
+  library(limma)
+  library(edgeR)
+  library(org.Hs.eg.db)
+  library(biomaRt)
+  library(readxl)
+  library(reshape2)
+  library(ggpubr)
+  library(pheatmap)
+  library(UpSetR)
+  library(rstatix)
+  library(doParallel)
+})
+
+# ---------------------------------------------------------------
+# Define Paths and Parameters
+# ---------------------------------------------------------------
+data_dir   <- "data/"
+output_dir <- "figures/Figure1_Exercise_Tissues/"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# ---------------------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------------------
+
+# Read all weekly sheets from a given tissue directory
+read_tissue_data <- function(tissue_name, base_dir) {
+  pattern <- paste0(base_dir, "/", tissue_name, "/", tolower(tissue_name), "_lnc_")
+  weeks <- c("1W", "2W", "4W", "8W")
+  dfs <- lapply(weeks, function(w) {
+    path <- paste0(pattern, w, ".xlsx")
+    if (file.exists(path)) read_excel(path, sheet = 1) else NULL
+  })
+  tissue_data <- bind_rows(dfs) %>% mutate(tissue = toupper(tissue_name))
+  return(tissue_data)
+}
+
+# Standardized plot saving
+save_plot <- function(plot, filename, width, height) {
+  ggsave(
+    filename = file.path(output_dir, filename),
+    plot = plot,
+    width = width, height = height,
+    dpi = 600, device = "tiff", bg = "transparent", limitsize = FALSE
+  )
+}
+
+# ---------------------------------------------------------------
+# Figure 1B: Total Transcripts per Tissue
+# ---------------------------------------------------------------
+plot_total <- ggplot(my_data, aes(x = "Transcripts", y = fct_rev(fct_inorder(Tissues)), fill = Transcripts)) +
+  geom_tile(color = "black", size = 0.5) +
+  geom_text(aes(label = Transcripts), size = 3) +
+  scale_fill_gradient(low = "white", high = "red") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "none"
+  )
+
+save_plot(plot_total, "Figure1C_All_Transcripts.tiff", 1.5, 10)
+
+# ---------------------------------------------------------------
+# Figure 1C: Differentially Expressed lncRNAs per Tissue
+# ---------------------------------------------------------------
+tissue_deg <- read_excel(file.path(data_dir, "Exercise_Tissues.xlsx"), sheet = 2)
+
+plot_deg <- ggplot(tissue_deg, aes(x = fct_rev(fct_inorder(Tissues)), y = DEG)) +
+  geom_col(color = "black", fill = "grey80") +
+  geom_text(aes(label = DEG), hjust = -0.2, size = 3.5) +
+  coord_flip() +
+  labs(y = "Number of DELs", title = "Differentially Expressed lncRNAs per Tissue") +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black", size = 1),
+    axis.text = element_text(color = "black", face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  ) +
+  ylim(0, 110)
+
+save_plot(plot_deg, "Figure1A_DELs_per_Tissue.tiff", 4, 10)
+
+# ---------------------------------------------------------------
+# Figure 1D: Weekly Expression Dynamics (Heatmap)
+# ---------------------------------------------------------------
+# Placeholder dataset (replace with actual input)
+my_data <- read_excel(file.path(data_dir, "Exercise_Tissues.xlsx"), sheet = 3)
+
+my_data_long <- my_data %>%
+  pivot_longer(cols = starts_with("W"), names_to = "Week", values_to = "Value")
+
+plot_weeks <- ggplot(my_data_long, aes(x = Week, y = fct_rev(fct_inorder(Tissues)), fill = Value)) +
+  geom_tile(color = "black", size = 0.5) +
+  geom_text(aes(label = Value), size = 3) +
+  scale_fill_gradient(low = "white", high = "orange") +
+  labs(x = "Weeks of Training", y = NULL, title = "Training-Dependent DELs") +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+save_plot(plot_weeks, "Figure1B_Weekly_DELs.tiff", 2.5, 10)
+
+# ---------------------------------------------------------------
+# Load and Merge Tissue Data
+# ---------------------------------------------------------------
+tissues <- c("ADRENAL", "BAT", "BLOOD", "COLON", "CORTEX", "HEART",
+             "HIPPOCAMPUS", "HYPOTHALAMUS", "KIDNEY", "LIVER", "LUNG",
+             "OVARY", "SKMGN", "SKMVL", "SMLINT", "SPLEEN", "TESTES", "WAT")
+
+message("Loading tissue-level datasets...")
+tissue_list <- lapply(tissues, read_tissue_data, base_dir = file.path(data_dir, "MoTrPAC_mRN7.2"))
+all_final <- bind_rows(tissue_list) %>%
+  filter(FPKM > cutoff_FPKM, abs(logFC) > cutoff_logFC, p_value < cutoff_pval)
+
+# ---------------------------------------------------------------
+# Figure 1D: Sex Distribution
+# ---------------------------------------------------------------
+sex_distribution <- all_final %>%
+  group_by(tissue, sex) %>%
+  summarize(n = n(), .groups = "drop") %>%
+  mutate(perc = n / sum(n) * 100)
+
+plot_sex <- ggplot(sex_distribution, aes(x = fct_rev(fct_inorder(tissue)), y = perc, fill = sex)) +
+  geom_col(position = "stack", color = "black") +
+  scale_fill_manual(values = c("pink", "#0072B2")) +
+  coord_flip() +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black", size = 1),
+    panel.grid = element_blank(),
+    axis.text = element_text(face = "bold"),
+    legend.position = "none"
+  ) +
+  labs(y = "Percentage (%)", x = NULL, title = "Sex Distribution per Tissue")
+
+save_plot(plot_sex, "Figure1D_Sex_Distribution.tiff", 3, 10)
+
+# ---------------------------------------------------------------
+# Figure 1E: Expression Distribution (Z-score)
+# ---------------------------------------------------------------
+plot_exp <- ggplot(all_final, aes(x = fct_rev(fct_inorder(tissue)), y = zscore, fill = sex)) +
+  geom_boxplot(outlier.size = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  scale_fill_manual(values = c("pink", "#0072B2")) +
+  labs(y = "Z-score", x = NULL, title = "Expression Distribution by Sex") +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black", size = 1),
+    panel.grid = element_blank(),
+    axis.text = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+save_plot(plot_exp, "Figure1E_Zscore_Boxplot.tiff", 3, 10)
