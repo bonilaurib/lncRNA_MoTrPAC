@@ -1,0 +1,299 @@
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(readr)
+  library(readxl)
+  library(pheatmap)
+  library(RColorBrewer)
+  library(scales)
+  library(ggrepel)
+  library(ggpubr)
+  library(reshape2)
+})
+
+# ---------------------------
+# CONFIG (edit paths/names if needed)
+# ---------------------------
+IN_DIR <- "input"         # root folder for inputs
+OUT_DIR <- "Figure5"      # output folder (created if absent)
+
+# tissue CSVs with significant lncRNA–ATAC pairs
+files_sigpairs <- list(
+  SKMGN = file.path(IN_DIR, "ATAC/SKMGN/sigpairs.csv"),
+  Lung  = file.path(IN_DIR, "ATAC/LUNG/sigpairs.csv"),
+  BAT   = file.path(IN_DIR, "ATAC/BAT/sigpairs.csv"),
+  Kidney= file.path(IN_DIR, "ATAC/KIDNEY/sigpairs.csv"),
+  Heart = file.path(IN_DIR, "ATAC/HEART/sigpairs.csv"),
+  WAT   = file.path(IN_DIR, "ATAC/WAT/sigpairs.csv"),
+  Liver = file.path(IN_DIR, "ATAC/LIVER/sigpairs.csv")
+)
+
+# liver inference (lncRNA–ATAC–gene neighborhood table)
+file_liver_inference <- file.path(IN_DIR, "ATAC/LIVER/lncRNA_regulation_inference.csv")
+
+# timecourse (panel I): single tidy file expected with columns:
+# feature_ID / gene_name / biotype in {"lncRNA","protein_coding"} / sex / comparison_group in {"1w","2w","4w","8w"} / zscore
+file_liver_timecourse <- file.path(IN_DIR, "LIVER/liver_timecourse.csv")
+
+# GO triads (panel J): two sheets or two CSVs; here: Excel with sheets "Up" and "Down"
+file_go_triads <- file.path(IN_DIR, "LIVER/GO_enrichment_triads.xlsx")
+
+# Panel I targets (edit if desired)
+panel_I_lnc_id   <- "ENSRNOG00000065275"
+panel_I_gene_sym <- "Tbxa2r"
+panel_I_sex      <- "male"
+
+# ---------------------------
+# Setup
+# ---------------------------
+if (!dir.exists(OUT_DIR)) dir.create(OUT_DIR, recursive = TRUE)
+
+save_tiff <- function(plot_obj, name, w, h, dpi = 600, bg = "transparent") {
+  ggsave(filename = file.path(OUT_DIR, name), plot = plot_obj,
+         width = w, height = h, dpi = dpi, device = "tiff",
+         limitsize = FALSE, bg = bg)
+}
+
+theme_paper <- theme_classic(base_size = 22) +
+  theme(
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black", face = "bold"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1.2),
+    legend.position = "right"
+  )
+
+# ---------------------------
+# Utilities
+# ---------------------------
+coalesce_col <- function(df, new, candidates) {
+  for (c in candidates) if (c %in% names(df)) return(df %>% mutate("{new}" := .data[[c]]))
+  df %>% mutate("{new}" := NA)
+}
+
+read_sigpairs <- function(path, tissue_name) {
+  stopifnot(file.exists(path))
+  df <- suppressMessages(read_csv(path, show_col_types = FALSE))
+
+  # standardize column names: lncRNA id, ATAC peak id, correlation, FDR/padj/q, distance (bp)
+  cn <- names(df)
+  df <- df %>%
+    {coalesce_col(., "lncRNA", c("lncRNA","lncrna","feature_ID","transcript_id","lnc_id"))} %>%
+    {coalesce_col(., "ATACpeak", c("ATACpeak","peak_id","peak","atac_peak"))} %>%
+    {coalesce_col(., "corr", c("correlation","corr","r"))} %>%
+    {coalesce_col(., "FDR", c("FDR","padj","q_value","qvalue"))} %>%
+    {coalesce_col(., "distance_bp", c("distance_bp","distance","lncRNA_peak_distance"))} %>%
+    {coalesce_col(., "gene_id", c("gene_id","target_gene_id"))} %>%
+    {coalesce_col(., "gene_name", c("gene_name","gene_symbol","symbol"))} %>%
+    {coalesce_col(., "gene_relation", c("gene_relation","peak_location","relation","annotation"))} %>%
+    mutate(Tissue = tissue_name) %>%
+    select(lncRNA, ATACpeak, corr, FDR, distance_bp, gene_id, gene_name, gene_relation, Tissue) %>%
+    distinct()
+}
+
+distance_kb <- function(x) {
+  x <- suppressWarnings(as.numeric(x))
+  abs(x) / 1000
+}
+
+is_delnc <- function(FDR) {
+  !is.na(FDR) && FDR < 0.05
+}
+
+scatter_density <- function(df, title_txt = NULL) {
+  df2 <- df %>%
+    mutate(dist_kb = distance_kb(distance_bp)) %>%
+    filter(is.finite(dist_kb), is.finite(corr))
+  ggplot(df2, aes(dist_kb, corr)) +
+    geom_point(alpha = 0.35, size = 1.5) +
+    stat_density_2d(aes(fill = after_stat(level)), geom = "polygon", alpha = 0.45, bins = 12) +
+    scale_fill_distiller(palette = "YlOrRd", direction = 1, guide = "none") +
+    labs(x = "Distance (kb)", y = "Correlation (lncRNA–ATAC peak)", title = title_txt) +
+    theme_paper
+}
+
+matrix_by_lnc <- function(df_all) {
+  df_all %>%
+    transmute(lncRNA, pair = paste(Tissue, ATACpeak, sep = "|"), corr) %>%
+    pivot_wider(names_from = pair, values_from = corr) %>%
+    column_to_rownames("lncRNA") %>%
+    as.matrix() %>% {.[is.na(.)] <- 0; .}
+}
+
+# ---------------------------
+# Load all tissues
+# ---------------------------
+all_tissue_list <- imap(files_sigpairs, ~ read_sigpairs(.x, .y))
+all_data <- bind_rows(all_tissue_list)
+
+# ---------------------------
+# Global correlation heatmap (overview)
+# ---------------------------
+mat <- matrix_by_lnc(all_data)
+ann_col <- data.frame(Tissue = sapply(strsplit(colnames(mat), "\\|"), `[`, 1))
+rownames(ann_col) <- colnames(mat)
+tissues <- unique(ann_col$Tissue)
+tissue_cols <- setNames(brewer.pal(max(3, min(12, length(tissues))), "Set3")[seq_along(tissues)], tissues)
+
+png(file.path(OUT_DIR, "Figure5_GlobalHeatmap.png"), width = 2400, height = 1800, res = 300)
+pheatmap(
+  mat,
+  color = colorRampPalette(c("blue","white","red"))(101),
+  annotation_col = ann_col,
+  annotation_colors = list(Tissue = tissue_cols),
+  cluster_rows = TRUE, cluster_cols = TRUE,
+  show_rownames = FALSE, show_colnames = FALSE,
+  fontsize = 8, border_color = NA
+)
+dev.off()
+
+# ---------------------------
+# Panels A–G: scatter+density (all vs DELnc)
+# Order: A SKMGN, B Lung, C BAT, D Kidney, E Heart, F WAT, G Liver
+# ---------------------------
+panel_order <- c("SKMGN","Lung","BAT","Kidney","Heart","WAT","Liver")
+
+for (tt in panel_order) {
+  dft <- all_data %>% filter(Tissue == tt)
+  p_all <- scatter_density(dft, paste(tt, "— All lncRNA"))
+  p_del <- scatter_density(dft %>% filter(purrr::map_lgl(FDR, is_delnc)),
+                           paste(tt, "— Differential lncRNA (FDR<0.05)"))
+  save_tiff(p_all, paste0("Figure5_", tt, "_All.tiff"), 6, 5)
+  save_tiff(p_del, paste0("Figure5_", tt, "_DELnc.tiff"), 6, 5)
+}
+
+# ---------------------------
+# Panel H: Liver activity score (lncRNA–ATAC–gene)
+# ---------------------------
+if (file.exists(file_liver_inference)) {
+  liver_inf <- suppressMessages(read_csv(file_liver_inference, show_col_types = FALSE))
+
+  # standardize fields
+  liver_inf <- liver_inf %>%
+    {coalesce_col(., "correlation", c("correlation","corr","r"))} %>%
+    {coalesce_col(., "lncRNA_gene_distance_to_TSS", c("lncRNA_gene_distance_to_TSS","distance_to_TSS","dist_to_TSS","dist_TSS"))} %>%
+    {coalesce_col(., "gene_relation", c("gene_relation","peak_location","relation","annotation"))} %>%
+    {coalesce_col(., "gene_name", c("gene_name","gene_symbol","symbol"))}
+
+  liver_scores <- liver_inf %>%
+    mutate(
+      correlation = as.numeric(correlation),
+      lncRNA_gene_distance_to_TSS = as.numeric(lncRNA_gene_distance_to_TSS),
+      activity_score = correlation * (1 / (abs(lncRNA_gene_distance_to_TSS) + 1))
+    ) %>%
+    group_by(gene_id) %>%
+    slice_max(order_by = activity_score, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    arrange(desc(activity_score))
+
+  pH <- ggplot(liver_scores, aes(activity_score, correlation, fill = gene_relation)) +
+    geom_point(size = 3.5, alpha = 0.85, shape = 21, color = "black") +
+    scale_y_continuous(limits = c(0.5, 1), name = "Correlation (lncRNA–ATAC)") +
+    scale_x_continuous(labels = label_number(accuracy = 0.0001)) +
+    scale_fill_manual(values = c(Promoter = "indianred", `Gene body` = "orange", Intergenic = "grey70")) +
+    geom_text_repel(
+      data = liver_scores %>% slice_max(activity_score, n = 12),
+      aes(label = gene_name),
+      size = 4.2, max.overlaps = 60
+    ) +
+    labs(x = "Activity score") +
+    theme_paper + theme(legend.position = "none")
+  save_tiff(pH, "Figure5_H_Liver_ActivityScore.tiff", 6, 6)
+}
+
+# ---------------------------
+# Panel I: Timecourse (male liver) — lncRNA vs protein-coding
+# ---------------------------
+if (file.exists(file_liver_timecourse)) {
+  tc <- suppressMessages(read_csv(file_liver_timecourse, show_col_types = FALSE))
+
+  # expected columns: feature_ID / gene_name / biotype / sex / comparison_group / zscore
+  tc <- tc %>%
+    mutate(
+      biotype = as.character(biotype),
+      sex = as.character(sex),
+      comparison_group = factor(as.character(comparison_group), levels = c("1w","2w","4w","8w"))
+    )
+
+  lnc_df <- tc %>%
+    filter(biotype == "lncRNA", sex == panel_I_sex, feature_ID == panel_I_lnc_id) %>%
+    transmute(entity = "lncRNA", comparison_group, zscore)
+  pc_df  <- tc %>%
+    filter(biotype == "protein_coding", sex == panel_I_sex, gene_name == panel_I_gene_sym) %>%
+    transmute(entity = "protein_coding", comparison_group, zscore)
+
+  if (nrow(lnc_df) > 0 && nrow(pc_df) > 0) {
+    traj <- bind_rows(lnc_df, pc_df)
+
+    pI <- ggplot(traj, aes(comparison_group, zscore, group = entity, color = entity)) +
+      geom_line(linewidth = 1.2) +
+      geom_point(size = 3) +
+      scale_color_manual(values = c(lncRNA = "orange", protein_coding = "#3366cc")) +
+      labs(x = "Weeks", y = "Z-score") +
+      theme_paper + theme(legend.title = element_blank())
+    save_tiff(pI, "Figure5_I_Liver_Trajectories.tiff", 6, 4)
+  }
+}
+
+# ---------------------------
+# Panel J: GO enrichment (triads, r ≥ 0.5)
+# ---------------------------
+if (file.exists(file_go_triads)) {
+  go_up   <- tryCatch(read_excel(file_go_triads, sheet = "Up"),   error = function(e) NULL)
+  go_down <- tryCatch(read_excel(file_go_triads, sheet = "Down"), error = function(e) NULL)
+
+  go_df <- bind_rows(
+    if (!is.null(go_up))   go_up   %>% mutate(Direction = "Up")   else NULL,
+    if (!is.null(go_down)) go_down %>% mutate(Direction = "Down") else NULL
+  ) %>%
+    {coalesce_col(., "GO",   c("GO","Term","Pathway"))} %>%
+    {coalesce_col(., "FDR",  c("FDR","qvalue","padj","Adj.P.Value"))} %>%
+    {coalesce_col(., "genes",c("genes","Count","N"))} %>%
+    mutate(FDR = as.numeric(FDR), genes = as.numeric(genes)) %>%
+    filter(is.finite(FDR), is.finite(genes)) %>%
+    mutate(Direction = factor(Direction, levels = c("Up","Down")))
+
+  if (nrow(go_df) > 0) {
+    pJ <- ggplot(go_df, aes(x = reorder(GO, -FDR), y = -log10(FDR), size = genes, fill = Direction)) +
+      geom_point(shape = 21, color = "black", alpha = 0.9) +
+      coord_flip() +
+      scale_fill_manual(values = c(Up = "#3366cc", Down = "red")) +
+      scale_size(range = c(3, 15)) +
+      labs(x = NULL, y = expression(-log[10](FDR)), size = "Genes", fill = NULL) +
+      theme_paper + theme(legend.position = "right")
+    save_tiff(pJ, "Figure5_J_GO_Triads.tiff", 8, 6)
+  }
+}
+
+# ---------------------------
+# Optional: liver-only heatmap with chromosome annotation
+# ---------------------------
+if (file.exists(files_sigpairs$Liver)) {
+  lv <- read_sigpairs(files_sigpairs$Liver, "Liver") %>%
+    filter(!is.na(corr)) %>%
+    mutate(Chromosome = sub(":.*", "", ATACpeak) |> gsub("^chr","", x = _))
+
+  lv_mat <- lv %>%
+    select(lncRNA, ATACpeak, corr) %>%
+    pivot_wider(names_from = ATACpeak, values_from = corr) %>%
+    column_to_rownames("lncRNA") %>%
+    as.matrix()
+  lv_mat[!is.finite(lv_mat)] <- 0
+
+  chrom_df <- lv %>%
+    distinct(ATACpeak, Chromosome) %>%
+    mutate(Chromosome = factor(Chromosome)) %>%
+    column_to_rownames("ATACpeak")
+  chrom_lvls <- levels(chrom_df$Chromosome)
+  chrom_cols <- setNames(colorRampPalette(brewer.pal(12,"Paired"))(length(chrom_lvls)), chrom_lvls)
+
+  png(file.path(OUT_DIR,"Figure5_LiverHeatmap.png"), width = 2200, height = 1600, res = 300)
+  pheatmap(
+    lv_mat,
+    color = colorRampPalette(c("blue","white","red"))(101),
+    annotation_col = chrom_df,
+    annotation_colors = list(Chromosome = chrom_cols),
+    cluster_rows = TRUE, cluster_cols = TRUE,
+    show_rownames = FALSE, show_colnames = FALSE,
+    border_color = NA, fontsize = 8
+  )
+  dev.off()
+}
