@@ -1,0 +1,200 @@
+
+
+# ---------------------------------------------------------------
+# Load Required Libraries
+# ---------------------------------------------------------------
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(readxl)
+  library(ggpubr)
+  library(ggcorrplot)
+  library(UpSetR)
+  library(Rtsne)
+  library(reshape2)
+  library(scales)
+})
+
+# ---------------------------------------------------------------
+# Define Paths and Directories
+# ---------------------------------------------------------------
+data_dir   <- "data/MoTrPAC_mRN7.2/"
+output_dir <- "figures/Figure2_Tissue_Clustering/"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# ---------------------------------------------------------------
+# Helper Function: Plot Saving
+# ---------------------------------------------------------------
+save_plot <- function(plot, filename, width, height) {
+  ggsave(
+    filename = file.path(output_dir, filename),
+    plot = plot,
+    width = width, height = height,
+    dpi = 600, device = "tiff", bg = "transparent", limitsize = FALSE
+  )
+}
+
+# ---------------------------------------------------------------
+# Helper Function: Read all finalXLSX by Tissue
+# ---------------------------------------------------------------
+read_tissue_final <- function(tissue) {
+  path <- file.path(data_dir, tissue, paste0("final", tolower(tissue), ".xlsx"))
+  if (file.exists(path)) {
+    df <- read_xlsx(path)
+    df$tissue <- tissue
+    return(df)
+  } else {
+    warning(paste("File not found:", path))
+    return(NULL)
+  }
+}
+
+# ---------------------------------------------------------------
+# Figure 2A: t-SNE by Sex
+# ---------------------------------------------------------------
+tissues <- c("ADRENAL","BAT","BLOOD","COLON","CORTEX","HEART",
+             "HIPPOCAMPUS","HYPOTHALAMUS","KIDNEY","LIVER","LUNG",
+             "OVARY","SKMGN","SKMVL","SMLINT","SPLEEN","TESTES","WAT")
+
+tissue_list <- lapply(tissues, read_tissue_final)
+tissue_list <- tissue_list[!sapply(tissue_list, is.null)]
+
+# Merge all tissues
+all <- reduce(tissue_list, full_join, by = c("feature_ID", "sex"))
+all[is.na(all)] <- 0
+
+all_male   <- all %>% filter(sex == "male") %>% select(-feature_ID, -sex)
+all_female <- all %>% filter(sex == "female") %>% select(-feature_ID, -sex)
+all_both   <- all %>% select(-feature_ID, -sex)
+
+# Transpose matrices
+data_list <- list(
+  all      = t(all_both),
+  male     = t(all_male),
+  female   = t(all_female)
+)
+
+# t-SNE parameters
+set.seed(42)
+tsne_params <- list(perplexity = 30, max_iter = 1000)
+
+run_tsne <- function(matrix_data) {
+  tsne_result <- Rtsne(matrix_data, perplexity = tsne_params$perplexity, 
+                       max_iter = tsne_params$max_iter, verbose = FALSE)
+  df <- as.data.frame(tsne_result$Y)
+  colnames(df) <- c("Component1", "Component2")
+  df$Tissue <- rep(tissues, each = 4)
+  return(df)
+}
+
+tsne_df_all    <- run_tsne(data_list$all)
+tsne_df_male   <- run_tsne(data_list$male)
+tsne_df_female <- run_tsne(data_list$female)
+
+# Plot function for t-SNE
+plot_tsne <- function(df, title, color_palette, limits = c(-700, 700)) {
+  ggplot(df, aes(x = Component1, y = Component2, fill = Tissue)) +
+    geom_point(shape = 21, size = 10) +
+    scale_fill_manual(values = color_palette) +
+    coord_cartesian(xlim = limits, ylim = limits) +
+    labs(x = "t-SNE Component 1", y = "t-SNE Component 2", title = title) +
+    theme_bw(base_size = 16) +
+    theme(
+      panel.border = element_rect(colour = "black", fill = NA, size = 1.5),
+      panel.grid = element_blank(),
+      axis.text = element_text(face = "bold", color = "black"),
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    )
+}
+
+tissue_colors <- c("#FFCCCC","#3366cc","red","#663300","#CCFFFF","orange","#33FFFF","#99CCFF","#660099",
+                   "purple","#CCFFCC","#336600","#009900","#666633","#330033","#FFCC33","darkblue","#999999")
+
+plot_male   <- plot_tsne(tsne_df_male,   "t-SNE: Male Samples", tissue_colors)
+plot_female <- plot_tsne(tsne_df_female, "t-SNE: Female Samples", tissue_colors)
+
+save_plot(plot_male, "Figure2A_tSNE_Male.tiff", 14, 8)
+save_plot(plot_female, "Figure2A_tSNE_Female.tiff", 14, 8)
+
+# ---------------------------------------------------------------
+# Figure 2B: Correlation Matrices (All, Male, Female)
+# ---------------------------------------------------------------
+correlation_by_sex <- function(df, sex_label, color_high) {
+  cor_matrix <- cor(df, use = "pairwise.complete.obs")
+  plot <- ggcorrplot(cor_matrix, hc.order = FALSE, outline.col = "white", lab = FALSE) +
+    scale_fill_gradient(low = "white", high = color_high, limits = c(0, 1), name = "Pearson Cor.") +
+    theme(text = element_text(size = 12, face = "bold"))
+  save_plot(plot, paste0("Figure2B_Correlation_", sex_label, ".tiff"), 10, 8)
+}
+
+correlation_by_sex(all_both,   "All",    "red")
+correlation_by_sex(all_male,   "Male",   "#3366cc")
+correlation_by_sex(all_female, "Female", "pink")
+
+# ---------------------------------------------------------------
+# Figure 2C: Orthology Conservation
+# ---------------------------------------------------------------
+read_ortholog_report <- function(tissue, filename = paste0(tissue, "_report.xlsx")) {
+  path <- file.path(data_dir, tissue, filename)
+  if (file.exists(path)) {
+    df <- read_excel(path, sheet = 2)
+    df$tissue <- tissue
+    return(df)
+  } else {
+    warning(paste("File not found:", path))
+    return(NULL)
+  }
+}
+
+tissue_reports <- c("ADRENAL","SMLINT","SKMVL","SPLEEN","TESTES","SKMGN","OVARY","LUNG",
+                    "BAT","WAT","BLOOD","LIVER","KIDNEY","HYPOTHALAMUS","HIPPOCAMPUS",
+                    "HEART","CORTEX","COLON")
+
+report_list <- lapply(tissue_reports, read_ortholog_report)
+report_list <- report_list[!sapply(report_list, is.null)]
+combined_data <- bind_rows(report_list)
+
+tissue_summary <- combined_data %>%
+  group_by(tissue, orthologs) %>%
+  summarise(count = n(), .groups = "drop_last") %>%
+  mutate(percentage = count / sum(count))
+
+plot_cons <- ggplot(tissue_summary, aes(x = tissue, y = percentage, fill = orthologs)) +
+  geom_col(color = "black", position = "fill") +
+  scale_fill_brewer(palette = "Set1") +
+  labs(y = "Percentage", fill = "Orthology", title = "Cross-Species Orthology Conservation") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 0.5, face = "bold", color = "black"),
+    axis.text.y = element_text(face = "bold", color = "black"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+save_plot(plot_cons, "Figure2C_Orthology_Conservation.tiff", 18, 5)
+
+# ---------------------------------------------------------------
+# Figure 2D: Shared DELs (UpSet Plots)
+# ---------------------------------------------------------------
+oito_path <- file.path("data", "oito.xlsx")
+if (file.exists(oito_path)) {
+  oito <- read_excel(oito_path)
+  set_list <- split(oito$feature_ID, oito$tissue)
+  upset(fromList(set_list),
+        nsets = 8,
+        order.by = "freq",
+        mainbar.y.label = "Number of Shared DELs",
+        matrix.color = "black",
+        point.size = 4,
+        text.scale = c(1.8, 1.5, 1.5, 1, 1.8, 1.5),
+        main.bar.color = "grey40",
+        keep.order = TRUE)
+  dev.copy(tiff, filename = file.path(output_dir, "Figure2D_UpSet_DELs.tiff"),
+           width = 18, height = 5, units = "in", res = 600)
+  dev.off()
+}
+
+# ===============================================================
+# End of Script
+# ===============================================================
