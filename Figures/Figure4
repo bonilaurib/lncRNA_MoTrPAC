@@ -196,6 +196,173 @@ plot_wat_common <- plot_weekly_common(WATcommon, palette_wat, "WAT Weekly Expres
 save_plot(plot_bat_common, "Figure4E_BAT_Weekly_Common.tiff", 10, 5)
 save_plot(plot_wat_common, "Figure4F_WAT_Weekly_Common.tiff", 10, 5)
 
+# ---------------------------------------------------------------
+# Section: Minimum Free Energy (MFE) Analysis
+# ---------------------------------------------------------------
+
+# BAT MFE
+bat <- read_excel(file.path(data_dir, "BAT/Coding/MFElncRNA.xlsx"))
+bat$MFE <- as.numeric(str_extract(bat$MFE, "-\\d+"))
+bat$biotype <- "lncRNA"
+
+batpc <- read_excel(file.path(data_dir, "BAT/Coding/MFEpcoding.xlsx"))
+batpc$MFE <- as.numeric(str_extract(batpc$MFE, "-\\d+"))
+batpc$biotype <- "protein_coding"
+
+batfinal <- rbind(bat, batpc)
+batfinal$tissue <- "BAT"
+
+# Statistical comparison
+wilcox.test(bat$MFE, batpc$MFE)
+ks.test(bat$MFE, batpc$MFE)
+
+# BAT ECDF Plot
+plot_mfe_bat <- ggplot(batfinal, aes(x = MFE, color = biotype)) +
+  stat_ecdf(linewidth = 4, show.legend = TRUE) +
+  theme(
+    axis.line = element_line(color = "black"),
+    panel.background = element_rect(colour = "black", fill = "white"),
+    panel.grid = element_blank(),
+    legend.position = "bottom",
+    text = element_text(size = 25, color = "black", face = "bold"),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1.5)
+  ) +
+  labs(x = "Minimum Free Energy (kcal/mol)", y = "Cumulative Frequency") +
+  scale_color_manual(values = c("blue", "grey"))
+
+save_plot(plot_mfe_bat, "Figure4G_MFE_BAT.tiff", 7, 6)
+
+# WAT MFE
+wat <- read_excel(file.path(data_dir, "WAT/Coding/MFElncRNA.xlsx"))
+wat$MFE <- as.numeric(str_extract(wat$MFE, "-\\d+"))
+wat$biotype <- "lncRNA"
+
+watpc <- read_excel(file.path(data_dir, "WAT/Coding/MFEpcoding.xlsx"))
+watpc$MFE <- as.numeric(str_extract(watpc$MFE, "-\\d+"))
+watpc$biotype <- "protein_coding"
+
+watfinal <- rbind(wat, watpc)
+watfinal$tissue <- "WAT"
+
+# Statistical comparison
+wilcox.test(wat$MFE, watpc$MFE)
+ks.test(wat$MFE, watpc$MFE)
+
+# WAT ECDF Plot
+plot_mfe_wat <- ggplot(watfinal, aes(x = MFE, color = biotype)) +
+  stat_ecdf(linewidth = 4, show.legend = TRUE) +
+  theme(
+    axis.line = element_line(color = "black"),
+    panel.background = element_rect(colour = "black", fill = "white"),
+    panel.grid = element_blank(),
+    legend.position = "bottom",
+    text = element_text(size = 25, color = "black", face = "bold"),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1.5)
+  ) +
+  labs(x = "Minimum Free Energy (kcal/mol)", y = "Cumulative Frequency") +
+  scale_color_manual(values = c("orange", "grey"))
+
+save_plot(plot_mfe_wat, "Figure4H_MFE_WAT.tiff", 7, 6)
+
+# Combined FAT MFE
+fatfinal <- bind_rows(watfinal, batfinal) %>% na.omit()
+fatfinal <- fatfinal %>% mutate(biotype_tissue = paste(tissue, biotype, sep = "_"))
+
+biotype_colors <- c(
+  "BAT_lncRNA" = "#3366cc",
+  "BAT_protein_coding" = "grey",
+  "WAT_lncRNA" = "orange",
+  "WAT_protein_coding" = "#696969"
+)
+
+plot_mfe_fat <- ggplot(fatfinal, aes(x = MFE, color = biotype_tissue)) +
+  stat_ecdf(linewidth = 4, show.legend = TRUE) +
+  theme(
+    axis.line = element_line(color = "black"),
+    panel.background = element_rect(colour = "black", fill = "white"),
+    panel.grid = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    text = element_text(size = 20, color = "black"),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1.5)
+  ) +
+  labs(x = "Minimum Free Energy (kcal/mol)", y = "Cumulative Frequency") +
+  guides(color = guide_legend(ncol = 2)) +
+  scale_color_manual(values = biotype_colors) +
+  xlim(-4000, 0)
+
+save_plot(plot_mfe_fat, "Figure4I_MFE_FAT.tiff", 7, 6)
+
+# Zoomed MFE view
+plot_mfe_zoom <- ggplot(fatfinal, aes(x = MFE, fill = tissue, color = paste(biotype, tissue))) +
+  stat_ecdf(linewidth = 4.2, show.legend = TRUE) +
+  theme_void() +
+  theme(panel.background = element_rect(fill = "white"), legend.position = "none") +
+  scale_color_manual(values = c("#3366cc", "orange", "grey", "#696969")) +
+  xlim(-1200, -800)
+
+save_plot(plot_mfe_zoom, "Figure4J_MFE_FAT_Zoom.tiff", 7, 6)
+
+# ---------------------------------------------------------------
+# Section: Weekly Common Dynamics (BAT and WAT)
+# ---------------------------------------------------------------
+
+merge_weekly_files <- function(tissue) {
+  weeks <- c("1W", "2W", "4W", "8W")
+  dfs <- lapply(weeks, function(w) {
+    df <- read_excel(file.path(data_dir, tissue, paste0(tissue, "_lnc_", w, ".xlsx")))
+    df[, c(4:7, 9:21)] <- NULL
+    df
+  })
+  merged <- reduce(dfs, function(x, y) merge(x, y, by = c("feature_ID", "sex"), all = TRUE))
+  merged[is.na(merged)] <- 0
+  merged[, c(3, 5, 7, 9)] <- NULL
+  colnames(merged)[3:6] <- c("1W", "2W", "4W", "8W")
+  return(merged)
+}
+
+filter_common_genes <- function(df) {
+  df %>%
+    filter(
+      ((`1W` > 1) | (`1W` < -1)) +
+      ((`2W` > 1) | (`2W` < -1)) +
+      ((`4W` > 1) | (`4W` < -1)) +
+      ((`8W` > 1) | (`8W` < -1)) >= 2
+    ) %>%
+    mutate(SED = 0)
+}
+
+plot_weekly_trends <- function(df, title) {
+  melted <- melt(df, id.vars = c("feature_ID", "sex"),
+                 variable.name = "Timepoint", value.name = "Value")
+  ggplot(melted, aes(x = factor(Timepoint, levels = c("SED", "1W", "2W", "4W", "8W")),
+                     y = Value, color = feature_ID, group = feature_ID)) +
+    geom_line(linewidth = 2) +
+    geom_point(size = 5) +
+    geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.8) +
+    labs(y = "log2(Fold Change)", x = NULL, title = title) +
+    theme(
+      text = element_text(size = 20, face = "bold"),
+      panel.background = element_rect(fill = "white", colour = "black", linewidth = 1.2),
+      panel.grid = element_blank(),
+      axis.text = element_text(color = "black"),
+      legend.position = "right",
+      legend.title = element_blank()
+    )
+}
+
+# BAT
+bat_merged <- merge_weekly_files("BAT")
+filtered_bat <- filter_common_genes(bat_merged)
+plot_bat_week <- plot_weekly_trends(filtered_bat, "BAT Weekly Common Dynamics")
+save_plot(plot_bat_week, "Figure4K_BAT_Weekly_Common.tiff", 10, 6)
+
+# WAT
+wat_merged <- merge_weekly_files("WAT")
+filtered_wat <- filter_common_genes(wat_merged)
+plot_wat_week <- plot_weekly_trends(filtered_wat, "WAT Weekly Common Dynamics")
+save_plot(plot_wat_week, "Figure4L_WAT_Weekly_Common.tiff", 10, 6)
+
 # ===============================================================
-# End of Script
+# End of Section
 # ===============================================================
