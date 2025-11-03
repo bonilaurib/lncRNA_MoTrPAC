@@ -1,0 +1,201 @@
+# ===============================================================
+#  Project: The Long Non-coding RNA Landscape of Endurance Exercise Training
+#  Author: Bernardo Bonilauri
+#  Institution: Stanford University, Department of Medicine
+#  Script: 04_Figure4_FAT_PCA_and_Expression.R
+# ===============================================================
+
+# ---------------------------------------------------------------
+# Load Required Libraries
+# ---------------------------------------------------------------
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(readxl)
+  library(openxlsx)
+  library(RColorBrewer)
+})
+
+# ---------------------------------------------------------------
+# Define Paths and Parameters
+# ---------------------------------------------------------------
+data_dir   <- "data/"
+output_dir <- "figures/Figure4_FAT_PCA_Expression/"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# ---------------------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------------------
+
+# Function: Read weekly data (1W–8W) for a given tissue
+read_weeks <- function(tissue_name, base_dir = data_dir) {
+  weeks <- c("1W", "2W", "4W", "8W")
+  files <- paste0(base_dir, "/", tissue_name, "/", tissue_name, "_lnc_", weeks, ".xlsx")
+  df <- map2_dfr(files, weeks, ~mutate(read_xlsx(.x), comparison_group = .y))
+  return(df)
+}
+
+# Function: Merge multiple datasets by "feature_ID" and "sex"
+merge_by_feature <- function(file_paths) {
+  dfs <- lapply(file_paths, read_xlsx)
+  reduce(dfs, function(x, y) merge(x, y, by = c("feature_ID", "sex"), all = TRUE)) %>%
+    mutate(across(everything(), ~replace_na(., 0)))
+}
+
+# Function: Save plots in standardized format
+save_plot <- function(plot, filename, width, height) {
+  ggsave(
+    filename = file.path(output_dir, filename),
+    plot = plot,
+    width = width, height = height,
+    dpi = 600, device = "tiff", bg = "transparent", limitsize = FALSE
+  )
+}
+
+# ---------------------------------------------------------------
+# PCA: BAT + WAT Combined
+# ---------------------------------------------------------------
+file_paths <- list(
+  file.path(data_dir, "BAT/finalbat.xlsx"),
+  file.path(data_dir, "WAT/finalwat.xlsx")
+)
+
+fat_data <- merge_by_feature(file_paths)
+fat <- fat_data %>%
+  select(feature_ID, sex, matches("BAT"), matches("WAT")) %>%
+  mutate(across(-c(feature_ID, sex), as.numeric))
+
+# PCA computation
+pca <- prcomp(t(fat[,-c(1:2)]), center = TRUE, scale. = FALSE)
+pca_var <- round(100 * pca$sdev^2 / sum(pca$sdev^2), 1)
+
+df_pca <- data.frame(
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  sample = colnames(fat[,-c(1:2)]),
+  Tissue = rep(c("BAT", "WAT"), each = ncol(fat[,-c(1:2)]) / 2)
+)
+
+# PCA plot theme
+theme_pca <- theme(
+  panel.background = element_blank(),
+  panel.border = element_rect(fill = NA, linewidth = 1),
+  panel.grid = element_blank(),
+  axis.text = element_blank(),
+  axis.ticks = element_line(),
+  text = element_text(size = 25, face = "bold")
+)
+
+plot_pca <- ggplot(df_pca, aes(PC1, PC2, fill = Tissue)) +
+  geom_point(size = 10, shape = 21) +
+  labs(x = paste0("\nPC1 (", pca_var[1], "%)"),
+       y = paste0("PC2 (", pca_var[2], "%)\n")) +
+  scale_fill_manual(values = c("#3366cc", "orange")) +
+  theme_pca
+
+save_plot(plot_pca, "Figure4A_PCA_FAT.tiff", 8, 5)
+
+# ---------------------------------------------------------------
+# PCA by Sex
+# ---------------------------------------------------------------
+compute_pca_by_sex <- function(df, sex_label) {
+  df_sub <- df %>%
+    filter(sex == sex_label) %>%
+    select(-c(feature_ID, sex)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    filter(rowSums(. != 0) > 0)
+  pca <- prcomp(t(df_sub), center = TRUE, scale. = FALSE)
+  data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2],
+             sample = colnames(df_sub), sex = sex_label)
+}
+
+df_pca_combined <- bind_rows(
+  compute_pca_by_sex(fat, "female"),
+  compute_pca_by_sex(fat, "male")
+)
+
+plot_pca_sex <- ggplot(df_pca_combined, aes(PC1, PC2, fill = sex)) +
+  geom_point(size = 8, shape = 21) +
+  labs(x = paste0("\nPC1 (", pca_var[1], "%)"),
+       y = paste0("PC2 (", pca_var[2], "%)\n")) +
+  scale_fill_manual(values = c("female" = "#FF69B4", "male" = "#1E90FF")) +
+  theme_pca
+
+save_plot(plot_pca_sex, "Figure4B_PCA_FAT_Sex.tiff", 6, 4)
+
+# ---------------------------------------------------------------
+# Z-score Dynamics (BAT & WAT)
+# ---------------------------------------------------------------
+bat <- read_weeks("BAT")
+wat <- read_weeks("WAT")
+
+summary_by_sex <- function(df) {
+  df %>%
+    group_by(comparison_group, sex) %>%
+    summarize(mean_zscore = mean(zscore, na.rm = TRUE),
+              min_zscore = min(zscore, na.rm = TRUE),
+              max_zscore = max(zscore, na.rm = TRUE),
+              .groups = "drop")
+}
+
+bat_summary <- summary_by_sex(bat)
+wat_summary <- summary_by_sex(wat)
+
+theme_z <- theme_classic(base_size = 15) +
+  theme(axis.text.x = element_text(color = "black"),
+        legend.position = "right",
+        text = element_text(size = 15, face = "bold"))
+
+plot_zscore <- function(df, color_map, title) {
+  ggplot(df, aes(x = comparison_group, y = mean_zscore, color = sex, group = sex)) +
+    geom_ribbon(aes(ymin = min_zscore, ymax = max_zscore, fill = sex),
+                alpha = 0.2, color = NA) +
+    geom_line(size = 3) +
+    geom_point(size = 5) +
+    scale_color_manual(values = color_map) +
+    scale_fill_manual(values = color_map) +
+    ylim(-5, 7) +
+    labs(x = "Weeks of Training", y = "Mean Z-Score",
+         color = "Sex", fill = "Sex", title = title) +
+    theme_z
+}
+
+plot_bat_sex <- plot_zscore(bat_summary, c("pink", "skyblue"), "BAT: Mean Z-Score by Sex")
+plot_wat_sex <- plot_zscore(wat_summary, c("pink", "skyblue"), "WAT: Mean Z-Score by Sex")
+
+save_plot(plot_bat_sex, "Figure4C_BAT_Zscore.tiff", 5, 3)
+save_plot(plot_wat_sex, "Figure4D_WAT_Zscore.tiff", 5, 3)
+
+# ---------------------------------------------------------------
+# Common Weekly Expression Profiles (BAT + WAT)
+# ---------------------------------------------------------------
+plot_weekly_common <- function(df, color_palette, title) {
+  ggplot(df, aes(x = factor(comparison_group,
+                            levels = c("SED", "1W", "2W", "4W", "8W")),
+                 y = logFC, color = feature_ID, group = feature_ID)) +
+    geom_line(size = 2) +
+    geom_point(size = 5) +
+    geom_hline(yintercept = 0, linetype = "dashed", size = 0.8) +
+    ylab("log2(Fold Change)") +
+    labs(title = title) +
+    theme(text = element_text(size = 20, face = "bold"),
+          panel.background = element_rect(fill = "white", colour = "black", size = 1.2),
+          panel.grid = element_blank(),
+          legend.position = "right") +
+    scale_color_manual(values = color_palette)
+}
+
+palette_bat <- colorRampPalette(brewer.pal(9, "RdYlBu"))(20)
+palette_wat <- colorRampPalette(brewer.pal(9, "RdYlBu"))(22)
+
+BATcommon <- read_xlsx(file.path(data_dir, "BAT/bat_week_commons.xlsx"))
+WATcommon <- read_xlsx(file.path(data_dir, "WAT/wat_week_commons.xlsx"))
+
+plot_bat_common <- plot_weekly_common(BATcommon, palette_bat, "BAT Weekly Expression")
+plot_wat_common <- plot_weekly_common(WATcommon, palette_wat, "WAT Weekly Expression")
+
+save_plot(plot_bat_common, "Figure4E_BAT_Weekly_Common.tiff", 10, 5)
+save_plot(plot_wat_common, "Figure4F_WAT_Weekly_Common.tiff", 10, 5)
+
+# ===============================================================
+# End of Script
+# ===============================================================
