@@ -1,0 +1,179 @@
+# ===============================================================
+#  Project: The Long Non-coding RNA Landscape of Endurance Exercise Training
+#  Author: Bernardo Bonilauri
+#  Institution: Stanford University, Department of Medicine
+#  Script: 03_Figure3_Structure_and_Feature_Analysis.R
+# ===============================================================
+
+# ---------------------------------------------------------------
+# Load Required Libraries
+# ---------------------------------------------------------------
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(readxl)
+  library(reshape2)
+  library(Biostrings)
+  library(ggpubr)
+  library(ggsignif)
+  library(scales)
+})
+
+# ---------------------------------------------------------------
+# Define Directories and Utilities
+# ---------------------------------------------------------------
+data_dir   <- "data/MoTrPAC_mRN7.2/"
+output_dir <- "figures/Figure3_Structure_and_Features/"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+save_plot <- function(plot, filename, width, height) {
+  ggsave(
+    filename = file.path(output_dir, filename),
+    plot = plot,
+    width = width, height = height,
+    dpi = 600, device = "tiff", bg = "transparent", limitsize = FALSE
+  )
+}
+
+theme_paper <- theme_classic(base_size = 25) +
+  theme(
+    text = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black", face = "bold"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1.5),
+    legend.position = "none",
+    plot.margin = unit(c(1, 1, 1, 1), "line")
+  )
+
+# ---------------------------------------------------------------
+# Figure 3A: Principal Component Analysis
+# ---------------------------------------------------------------
+message("[1/5] Running PCA on muscle datasets...")
+
+muscle <- read_excel(file.path(data_dir, "Muscle/finalmuscle.xlsx"))
+
+# Compute PCA
+pca <- prcomp(t(muscle), center = TRUE)
+var_exp <- round(100 * pca$sdev^2 / sum(pca$sdev^2), 1)
+df_pca <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2],
+                     Tissue = rep(c("SKMGN", "SKMVL"), each = 4))
+
+# Plot PCA
+p_pca <- ggplot(df_pca, aes(PC1, PC2, fill = Tissue)) +
+  geom_point(size = 10, shape = 21) +
+  scale_fill_manual(values = c("SKMGN" = "#336600", "SKMVL" = "#009900")) +
+  labs(
+    x = paste0("PC1 (", var_exp[1], "%)"),
+    y = paste0("PC2 (", var_exp[2], "%)"),
+    title = "PCA: Skeletal Muscle lncRNAs"
+  ) +
+  theme_paper
+
+save_plot(p_pca, "Figure3A_PCA.tiff", 6, 4)
+
+# ---------------------------------------------------------------
+# Figure 3B: Z-Score Trends by Sex
+# ---------------------------------------------------------------
+message("[2/5] Plotting Z-score trends by sex...")
+
+zscore_data <- read_excel(file.path(data_dir, "Muscle/zscore_muscle.xlsx"))
+
+z_trend <- zscore_data %>%
+  group_by(comparison_group, sex) %>%
+  summarize(
+    mean_zscore = mean(zscore, na.rm = TRUE),
+    min_zscore  = min(zscore, na.rm = TRUE),
+    max_zscore  = max(zscore, na.rm = TRUE)
+  )
+
+p_z <- ggplot(z_trend, aes(x = comparison_group, y = mean_zscore, color = sex, group = sex)) +
+  geom_ribbon(aes(ymin = min_zscore, ymax = max_zscore, fill = sex), alpha = 0.2, color = NA) +
+  geom_line(size = 3) + geom_point(size = 4) +
+  scale_color_manual(values = c("female" = "#FF69B4", "male" = "#1E90FF")) +
+  scale_fill_manual(values = c("female" = "#FF69B4", "male" = "#1E90FF")) +
+  labs(x = "Weeks of Training", y = "Mean Z-Score", title = "Z-Score Distribution by Sex") +
+  theme_paper + theme(legend.position = "right")
+
+save_plot(p_z, "Figure3B_Zscore_Sex.tiff", 5, 3)
+
+# ---------------------------------------------------------------
+# Figure 3C: Structural Comparisons (Length, GC Content, MFE)
+# ---------------------------------------------------------------
+message("[3/5] Analyzing structural features...")
+
+structural_data <- read_excel(file.path(data_dir, "Structural/lncRNA_structure_summary.xlsx"))
+
+# RNA length
+p_len <- ggplot(structural_data, aes(x = Tissue, y = Length)) +
+  geom_boxplot(aes(fill = Tissue), color = "black") +
+  scale_fill_manual(values = c("#999999", "#CCCCCC")) +
+  labs(y = "Transcript Length (nt)", x = NULL, title = "lncRNA Transcript Length") +
+  theme_paper
+
+save_plot(p_len, "Figure3C_Length.tiff", 5, 3)
+
+# GC Content
+p_gc <- ggplot(structural_data, aes(x = Tissue, y = GC_content)) +
+  geom_boxplot(aes(fill = Tissue), color = "black") +
+  scale_fill_manual(values = c("#999999", "#CCCCCC")) +
+  labs(y = "GC Content (%)", x = NULL, title = "GC Composition") +
+  theme_paper
+
+save_plot(p_gc, "Figure3C_GCcontent.tiff", 5, 3)
+
+# Minimum Free Energy
+p_mfe <- ggplot(structural_data, aes(x = Tissue, y = MFE)) +
+  geom_boxplot(aes(fill = Tissue), color = "black") +
+  scale_fill_manual(values = c("#999999", "#CCCCCC")) +
+  labs(y = "Minimum Free Energy (kcal/mol)", x = NULL, title = "RNA Secondary Structure Stability") +
+  theme_paper
+
+save_plot(p_mfe, "Figure3C_MFE.tiff", 5, 3)
+
+# ---------------------------------------------------------------
+# Figure 3D: Coding Potential (ORF Length and PhyloCSF)
+# ---------------------------------------------------------------
+message("[4/5] Comparing coding potential features...")
+
+coding_data <- read_excel(file.path(data_dir, "Structural/coding_features.xlsx"))
+
+p_orf <- ggplot(coding_data, aes(x = Tissue, y = ORF_length)) +
+  geom_boxplot(aes(fill = Tissue), color = "black") +
+  scale_fill_manual(values = c("#999999", "#CCCCCC")) +
+  labs(y = "ORF Length (aa)", x = NULL, title = "Predicted ORF Length") +
+  theme_paper
+
+save_plot(p_orf, "Figure3D_ORF_Length.tiff", 5, 3)
+
+p_csf <- ggplot(coding_data, aes(x = Tissue, y = PhyloCSF)) +
+  geom_boxplot(aes(fill = Tissue), color = "black") +
+  scale_fill_manual(values = c("#999999", "#CCCCCC")) +
+  labs(y = "PhyloCSF Score", x = NULL, title = "Evolutionary Coding Potential") +
+  theme_paper
+
+save_plot(p_csf, "Figure3D_PhyloCSF.tiff", 5, 3)
+
+# ---------------------------------------------------------------
+# Figure 3E: Correlation Heatmap
+# ---------------------------------------------------------------
+message("[5/5] Generating correlation matrix...")
+
+corr_data <- read_excel(file.path(data_dir, "Muscle/muscle_expression_matrix.xlsx"))
+corr_matrix <- cor(corr_data[, -1], use = "pairwise.complete.obs")
+
+corr_melt <- melt(corr_matrix)
+p_corr <- ggplot(corr_melt, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "red", limits = c(0, 1)) +
+  labs(x = NULL, y = NULL, fill = "Pearson r", title = "lncRNA Expression Correlation") +
+  theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold"),
+        axis.text.y = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        panel.grid = element_blank(),
+        legend.position = "right")
+
+save_plot(p_corr, "Figure3E_Correlation.tiff", 5, 4)
+
+# ===============================================================
+# End of Script
+# ===============================================================
