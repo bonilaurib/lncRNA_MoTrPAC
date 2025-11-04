@@ -13,6 +13,7 @@ suppressPackageStartupMessages({
   library(readxl)
   library(openxlsx)
   library(RColorBrewer)
+  library(reshape2)
 })
 
 # ---------------------------------------------------------------
@@ -362,6 +363,171 @@ wat_merged <- merge_weekly_files("WAT")
 filtered_wat <- filter_common_genes(wat_merged)
 plot_wat_week <- plot_weekly_trends(filtered_wat, "WAT Weekly Common Dynamics")
 save_plot(plot_wat_week, "Figure4L_WAT_Weekly_Common.tiff", 10, 6)
+
+# ===============================================================
+#  Section: Gene Network Correlation and Coding Potential (BAT)
+# ===============================================================
+
+# ---------------------------------------------------------------
+# Load Data and Filter for lncRNA–mRNA Correlation
+# ---------------------------------------------------------------
+genes <- read_excel(file.path(data_dir, "RAT_mart_export.xlsx"))
+bat_file <- file.path(data_dir, "BAT/pass1b-06_BAT_transcript-rna-seq_timewise-dea.xlsx")
+
+bat <- read_excel(bat_file, 
+                  col_types = c("text", "text", "text", "text", "text", "text",
+                                rep("numeric", 10))) %>%
+  merge(genes, by = "feature_ID") %>%
+  filter(biotype %in% c("lncRNA", "protein_coding"),
+         comparison_average_intensity > 1,
+         reference_average_intensity > 1,
+         p_value < 0.01)
+
+bat[, c(4:11, 13:21)] <- NULL
+
+# ---------------------------------------------------------------
+# Merge Timepoints (1W, 2W, 4W, 8W)
+# ---------------------------------------------------------------
+bat_timepoints <- map(c("1w", "2w", "4w", "8w"), function(tp) {
+  df <- bat %>% filter(comparison_group == tp)
+  df[!duplicated(df[, c("feature_ID", "sex")]), ]
+})
+
+bat_merged <- reduce(bat_timepoints, right_join, by = c("feature_ID", "sex")) %>%
+  select(feature_ID, sex,
+         zscore1 = zscore.x, zscore2 = zscore.y,
+         zscore4 = zscore.x.x, zscore8 = zscore.y.y) %>%
+  mutate(across(everything(), ~replace_na(., 0)))
+
+write.table(bat_merged, file.path(data_dir, "BAT/bat_merged.txt"),
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+# ---------------------------------------------------------------
+# Correlation Analysis (lncRNA–mRNA)
+# ---------------------------------------------------------------
+bat_merged <- read.table(file.path(data_dir, "BAT/bat_merged.txt"),
+                         header = TRUE, sep = "\t")
+
+row_names_column <- bat_merged$feature_ID
+bat_merged <- bat_merged %>% select(-feature_ID)
+rownames(bat_merged) <- make.unique(as.character(row_names_column))
+
+cormat <- cor(t(bat_merged), method = "pearson")
+high_corr_df <- which(cormat > 0.6, arr.ind = TRUE) %>%
+  as.data.frame() %>%
+  mutate(feature_ID = rownames(cormat)[row],
+         gene2 = colnames(cormat)[col],
+         correlation = cormat[cbind(row, col)]) %>%
+  select(feature_ID, gene2, correlation) %>%
+  distinct()
+
+BATlnc <- bat %>%
+  filter(biotype == "lncRNA", p_value < 0.01, abs(logFC) > 1,
+         comparison_average_intensity > 1, reference_average_intensity > 1) %>%
+  distinct(feature_ID, .keep_all = TRUE)
+
+merge_df <- merge(BATlnc, high_corr_df, by = "feature_ID") %>%
+  distinct(feature_ID, gene2)
+
+prot <- bat %>%
+  filter(biotype == "protein_coding", p_value < 0.01) %>%
+  rename(gene2 = feature_ID)
+
+finalBAT <- merge(merge_df, prot, by = "gene2") %>%
+  distinct(gene2, .keep_all = TRUE)
+
+finalBAT_up   <- finalBAT %>% filter(logFC > 1)
+finalBAT_down <- finalBAT %>% filter(logFC < -1)
+
+write_xlsx(finalBAT_up,   file.path(data_dir, "BAT/PCC_UP_BAT.xlsx"))
+write_xlsx(finalBAT_down, file.path(data_dir, "BAT/PCC_DOWN_BAT.xlsx"))
+
+# ---------------------------------------------------------------
+# GO Enrichment Visualization (Up & Down)
+# ---------------------------------------------------------------
+theme_go <- theme(
+  text = element_text(size = 20, face = "bold"),
+  panel.background = element_rect(fill = "white", colour = "black"),
+  panel.border = element_rect(colour = "black", fill = NA, linewidth = 1.5),
+  panel.grid = element_blank(),
+  axis.text = element_text(color = "black"),
+  legend.position = "right"
+)
+
+plot_go <- function(df, color) {
+  ggplot(df, aes(x = reorder(GO, -FDR), y = -log10(FDR), size = genes)) +
+    geom_point(alpha = 1, color = color) +
+    coord_flip() +
+    scale_radius(limits = c(50, 125), range = c(4, 20)) +
+    labs(x = NULL, y = expression(-log[10](FDR))) +
+    theme_go
+}
+
+up_go <- read_excel(file.path(data_dir, "BAT/PCC_UP_BAT_enrichment.Process.xlsx"), sheet = 2)
+down_go <- read_excel(file.path(data_dir, "BAT/PCC_DOWN_BAT_enrichment.Process.xlsx"), sheet = 2)
+
+plot_up   <- plot_go(up_go,   "#3366cc")
+plot_down <- plot_go(down_go, "red")
+
+save_plot(plot_up,   "Figure4K_GO_Up_BAT.tiff",   10, 5)
+save_plot(plot_down, "Figure4K_GO_Down_BAT.tiff", 10, 5)
+
+# ---------------------------------------------------------------
+# Differential GO Terms (BAT vs WAT)
+# ---------------------------------------------------------------
+up_full <- read_excel(file.path(data_dir, "BAT/PCC_UP_BAT_enrichment.Process.xlsx"), sheet = 1)
+up_diff <- read_excel(file.path(data_dir, "BAT/GOdifferent_BAT_WAT.xlsx"), sheet = 3)
+up_final <- merge(up_full, up_diff, by = "GO")
+
+write_xlsx(up_final, file.path(data_dir, "BAT/GO_BAT_updifferent.xlsx"))
+
+bat_diff <- read_excel(file.path(data_dir, "BAT/GO_BAT_updifferent.xlsx"))
+
+plot_go_diff <- ggplot(bat_diff, aes(x = reorder(GO, -FDR), y = -log10(FDR), size = genes)) +
+  geom_point(alpha = 1, color = "#3366cc") +
+  coord_flip() +
+  scale_radius(limits = c(12, 100), range = c(5, 20)) +
+  ylim(4, 9) +
+  theme_go +
+  theme(aspect.ratio = 1.8)
+
+save_plot(plot_go_diff, "Figure4L_GO_BAT_Diff.tiff", 10, 5)
+
+# ---------------------------------------------------------------
+# Coding Potential Correlation (RNAsamba vs CPC2)
+# ---------------------------------------------------------------
+samba <- read_excel(file.path(data_dir, "BAT/Coding/bat_rnasamba.xlsx")) %>%
+  rename(gene_ID = 1)
+cpc2  <- read_excel(file.path(data_dir, "BAT/Coding/BAT_result_cpc2.xlsx")) %>%
+  rename(gene_ID = 1)
+
+coding_merge <- merge(samba, cpc2, by = "gene_ID")
+cor.test(coding_merge$coding_score, coding_merge$coding_probability)
+
+plot_coding <- ggplot(coding_merge,
+                      aes(x = coding_score, y = coding_probability,
+                          fill = factor(ifelse(coding_score > 0.5 &
+                                               coding_probability > 0.5,
+                                               "High", "Low")))) +
+  geom_point(size = 8, color = "black", shape = 21) +
+  scale_fill_manual(values = c("Low" = "#3366cc", "High" = "red")) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", linewidth = 0.9) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", linewidth = 0.9) +
+  geom_text(aes(label = ifelse(coding_score > 0.5 & coding_probability > 0.88,
+                               as.character(gene_ID), "")),
+            hjust = 1, vjust = -0.6, size = 5) +
+  labs(x = "Coding Probability (RNAsamba)",
+       y = "Coding Probability (CPC2)") +
+  theme(
+    text = element_text(size = 25, face = "bold"),
+    panel.background = element_rect(fill = "white", colour = "black"),
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1.5),
+    panel.grid = element_blank(),
+    axis.text = element_text(color = "black"),
+    legend.position = "none"
+  )
+
+save_plot(plot_coding, "Figure4J_CodingPotential_BAT.tiff", 8, 6)
 
 # ===============================================================
 # End of Section
